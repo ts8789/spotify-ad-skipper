@@ -1,108 +1,67 @@
 package com.spotify.adskipper
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
+import android.view.KeyEvent
 
-/**
- * Singleton for managing Spotify application lifecycle through Android intents.
- * Provides methods to relaunch Spotify and send media control commands.
- * 
- * This controller handles intent-based communication with the Spotify app,
- * including launching the app and broadcasting media control intents.
- */
-object SpotifyController {
-    
-    private const val TAG = "SpotifyController"
-    private const val SPOTIFY_PACKAGE = "com.spotify.music"
-    
-    /**
-     * Checks if Spotify is installed on the device.
-     * 
-     * @param context Android context for package manager access
-     * @return true if Spotify is installed, false otherwise
-     */
-    fun isSpotifyInstalled(context: Context): Boolean {
+class SpotifyController(private val context: Context) {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var lastTriggerElapsedMs: Long = 0L
+    private val cooldownMs: Long = 4_000L
+    private val playDelayMs: Long = 800L
+
+    fun triggerBypassAndPlay(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastTriggerElapsedMs < cooldownMs) {
+            Log.d("SpotifyAdSkipper", "Übersprungen wegen Cooldown")
+            return false
+        }
+
+        val deepLinkIntent = Intent().apply {
+            component = ComponentName(
+                "com.spotify.music",
+                "com.spotify.checkout.deeplink.UcLoggedInDeepLinkActivity"
+            )
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
         return try {
-            context.packageManager.getPackageInfo(SPOTIFY_PACKAGE, 0)
+            context.startActivity(deepLinkIntent)
+            lastTriggerElapsedMs = now
+            Log.i("SpotifyAdSkipper", "UcLoggedInDeepLinkActivity gestartet")
+
+            mainHandler.postDelayed({
+                sendPlayCommand()
+            }, playDelayMs)
+
             true
-        } catch (e: PackageManager.NameNotFoundException) {
+        } catch (e: SecurityException) {
+            Log.e("SpotifyAdSkipper", "Start blockiert (nicht exportiert oder Berechtigung fehlt)", e)
+            false
+        } catch (e: Exception) {
+            Log.e("SpotifyAdSkipper", "Fehler beim Starten des Intents", e)
             false
         }
     }
-    
-    /**
-     * Relaunches the Spotify application.
-     * 
-     * Uses Shizuku-based activity launch to bypass Android 15 background activity launch restrictions.
-     * Falls back to standard startActivity() if Shizuku is unavailable (may fail on Android 15).
-     * 
-     * @param context Android context for intent operations
-     * @return Result.Success if launched, Result.Error if failed
-     */
-    fun relaunchSpotify(context: Context): Result<Unit> {
-        return try {
-            // Try Shizuku-based launch first (bypasses Android 15 restrictions)
-            when (val result = ShizukuController.launchActivity(SPOTIFY_PACKAGE, context)) {
-                is Result.Success -> {
-                    Log.d(TAG, "Spotify relaunched via Shizuku")
-                    Result.Success(Unit)
-                }
-                is Result.Error -> {
-                    // Fall back to standard launch (may fail on Android 15 from background)
-                    Log.w(TAG, "Shizuku launch failed, trying standard launch", result.exception)
-                    
-                    val intent = context.packageManager.getLaunchIntentForPackage(SPOTIFY_PACKAGE)
-                        ?: return Result.Error(IllegalStateException("Spotify not installed"))
-                    
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(intent)
-                    Log.d(TAG, "Spotify relaunched via standard launch")
-                    Result.Success(Unit)
-                }
-            }
+
+    fun sendPlayCommand() {
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val downEvent = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY)
+            val upEvent = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY)
+
+            audioManager.dispatchMediaKeyEvent(downEvent)
+            audioManager.dispatchMediaKeyEvent(upEvent)
+            Log.i("SpotifyAdSkipper", "Media-Play-Befehl gesendet")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to relaunch Spotify", e)
-            Result.Error(e)
-        }
-    }
-    
-    /**
-     * Sends play intent to Spotify using media button simulation.
-     * 
-     * Uses ACTION_MEDIA_BUTTON to simulate pressing a headset play button,
-     * which is the most reliable way to trigger playback on Android 15.
-     * 
-     * @param context Android context for broadcast operations
-     * @return Result.Success if sent, Result.Error if failed
-     */
-    fun play(context: Context): Result<Unit> {
-        return try {
-            // Send media button event (simulates headset play button)
-            val keyDownIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-                putExtra(Intent.EXTRA_KEY_EVENT, android.view.KeyEvent(
-                    android.view.KeyEvent.ACTION_DOWN,
-                    android.view.KeyEvent.KEYCODE_MEDIA_PLAY
-                ))
-                setPackage(SPOTIFY_PACKAGE)
-            }
-            context.sendBroadcast(keyDownIntent)
-            
-            val keyUpIntent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-                putExtra(Intent.EXTRA_KEY_EVENT, android.view.KeyEvent(
-                    android.view.KeyEvent.ACTION_UP,
-                    android.view.KeyEvent.KEYCODE_MEDIA_PLAY
-                ))
-                setPackage(SPOTIFY_PACKAGE)
-            }
-            context.sendBroadcast(keyUpIntent)
-            
-            Log.d(TAG, "Media button play intent sent")
-            Result.Success(Unit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to send play intent", e)
-            Result.Error(e)
+            Log.e("SpotifyAdSkipper", "Fehler beim Senden des Play-Befehls", e)
         }
     }
 }
